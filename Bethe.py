@@ -321,7 +321,7 @@ class GelThermodynamicsGUI:
         self.root.title("Macosko-Miller Topological Dashboard")
         self.root.geometry("450x700")
         
-        # 强制静音 Pandas 的未来弃用警告，免得污染后台
+        # Mute the warning of Pandas
         warnings.simplefilter(action='ignore', category=FutureWarning)
         
         self.notebook = ttk.Notebook(root)
@@ -333,7 +333,7 @@ class GelThermodynamicsGUI:
         self.notebook.add(self.tab_sim, text="Theoretical Simulation")
         self.notebook.add(self.tab_fit, text="Experimental Fitting")
         
-        # 全局参数（被两个标签页共享，以防你输入两次不同的分子量）
+        # Global parameters (shared by the two tabs)
         self.shared_vars = {
             'f_A': tk.StringVar(value="8.0"),
             'f_B': tk.StringVar(value="2.0"),
@@ -347,7 +347,7 @@ class GelThermodynamicsGUI:
         self._build_fit_tab()
 
     def _create_input_row(self, parent, label_text, text_var, row):
-        """批量生产输入框的无情流水线"""
+        """Create input row"""
         ttk.Label(parent, text=label_text).grid(row=row, column=0, padx=5, pady=5, sticky='e')
         ttk.Entry(parent, textvariable=text_var, width=18).grid(row=row, column=1, padx=5, pady=5, sticky='w')
 
@@ -419,7 +419,7 @@ class GelThermodynamicsGUI:
             Q_eq_0 = float(self.sim_Q0.get())
             pts = int(self.sim_pts.get())
             
-            # 实例化你的物理引擎
+            # Instantiation
             gel = TopologicalTransformation(
                 f_A=params['f_A'], f_B=params['f_B'], s=params['s'], 
                 M_A=params['M_A'], M_B=params['M_B'], c_total=params['c_total'], Q_eq_0=Q_eq_0
@@ -427,7 +427,7 @@ class GelThermodynamicsGUI:
             
             df = gel.simulate(p_end=p_end, k_alpha=k_alpha, num_points=pts)
             
-            # 严格按照需求生成包含关键参数的文件名
+            # Generate the filename with key parameters
             filename = f"sim_s{params['s']}_p{p_end}_k{k_alpha:.3f}_Q{Q_eq_0}.csv"
             df.to_csv(filename, index=False)
             
@@ -453,7 +453,7 @@ class GelThermodynamicsGUI:
             import pandas as pd
             df_exp = pd.read_csv(self.csv_path.get())
             
-            # 数字断头台：切除扩散区的幽灵数据[cite: 5]
+            # data pruning: remove the last several points which are in the diffusion zone
             if drop > 0:
                 t_raw = df_exp.iloc[:-drop, 0].values
                 Q_exp = df_exp.iloc[:-drop, 1].values
@@ -461,7 +461,7 @@ class GelThermodynamicsGUI:
                 t_raw = df_exp.iloc[:, 0].values
                 Q_exp = df_exp.iloc[:, 1].values
                 
-            # 强制执行你实验室的 1e5 时间缩放标准[cite: 5]
+            # Enforce the 1e5 time scaling
             t_exp = t_raw / 1e5
             Q_eq_0_real = Q_exp[0]
             
@@ -470,15 +470,15 @@ class GelThermodynamicsGUI:
                 M_A=params['M_A'], M_B=params['M_B'], c_total=params['c_total'], Q_eq_0=Q_eq_0_real
             )
             
-            # 警告：由于没有多线程，你的窗口将会假死。接受现实。
+            # Warning: UI will freeze because there is no multithreading.
             print("SciPy optimizer engaged. UI will freeze. Do not panic.")
             
             p_opt, k_opt = gel.fit_experiment(t_exp, Q_exp, p_guess, k_guess)
             
-            # 生成高分辨率拟合曲线
+            # Generate high-resolution fitted curve
             df_fit = gel.simulate(p_end=p_opt, k_alpha=k_opt, num_points=pts)
             
-            # 将优化结果烙印在文件名上
+            # Save the optimized results in the filename
             filename = f"fit_s{params['s']}_p{p_opt:.4f}_k{k_opt:.3f}.csv"
             df_fit.to_csv(filename, index=False)
             
