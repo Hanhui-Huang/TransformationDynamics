@@ -83,7 +83,11 @@ class TopologicalTransformation:
             
         return X_active, X_strands
 
+
     def _pure_physics(self, alpha_array, p_end):
+        """
+        This function return c_out, mu, nu, xi, Q arrays based on the input alpha_array and p_end.
+        """
 
         # 1. Solve the extinction probabilities
         Q_A, p_B = self._solve_extinction(alpha_array, p_end)
@@ -141,6 +145,7 @@ class TopologicalTransformation:
             
         return c_out, mu, nu, xi, Q
     
+
     def simulate(self, p_end, k_alpha, num_points=101):
         """
         USE CASE 1: The Forward Model. Generates the fully stamped DataFrame.
@@ -208,6 +213,36 @@ class TopologicalTransformation:
         )
         
         return best_params[0], best_params[1]
+
+    def one_parameter_fit_experiment(self, t_exp, Q_exp, p_end_guess, k_alpha_fix):
+        """
+        USE CASE 3: The Inverse Model. But only fit for p_end_guess.
+        The kinetic rate is frozen in the outer scope.
+        """
+        t_exp = np.asarray(t_exp)
+        Q_exp = np.asarray(Q_exp)
+        
+        # Remove k_alpha_fix from the signature. SciPy is no longer confused.
+        def objective_function(t_array, p_end_trial):
+            # The function naturally inherits k_alpha_fix from the surrounding environment.
+            alpha_trial = 1 - np.exp(-k_alpha_fix * t_array)
+            
+            _, _, _, _, Q_sim = self._pure_physics(alpha_trial, p_end_trial)
+            
+            return Q_sim
+
+        best_pend, _ = curve_fit(
+            objective_function, 
+            t_exp, 
+            Q_exp, 
+            p0=p_end_guess,
+            bounds=(0.0, 1.0)
+        )
+        
+        # Extract the solitary float from the numpy array to prevent downstream type errors.
+        return best_pend[0]
+
+
 
 class GelThermodynamicsGUI:
     def __init__(self, root):
@@ -307,10 +342,44 @@ class GelThermodynamicsGUI:
         # The execution button linking to the run_simulation method.
         ttk.Button(self.tab_sim, text="Run Forward Simulation", command=self.run_simulation).pack(pady=15)
 
+
     def _build_fit_tab(self):
         """
         Constructs Tab 2: The Experimental Fitting and Optimization interface.
         """
+        self._build_shared_inputs(self.tab_fit)
+        
+        frame_file = ttk.LabelFrame(self.tab_fit, text="Experimental Data Source")
+        frame_file.pack(fill='x', padx=10, pady=5)
+        
+        self.csv_path = tk.StringVar()
+        ttk.Entry(frame_file, textvariable=self.csv_path, state='readonly').pack(side='left', fill='x', expand=True, padx=5, pady=5)
+        ttk.Button(frame_file, text="Browse CSV...", command=self._browse_file).pack(side='right', padx=5, pady=5)
+        
+        frame_fit = ttk.LabelFrame(self.tab_fit, text="Optimization Parameters & Trimming")
+        frame_fit.pack(fill='x', padx=10, pady=5)
+        
+        self.fit_p_guess = tk.StringVar(value="0.7")
+        self.fit_k_guess = tk.StringVar(value="0.8")
+        self.fit_pts = tk.StringVar(value="1001")
+        self.fit_drop = tk.StringVar(value="2")
+        
+        self._create_input_row(frame_fit, "p_end_guess (Initial Anchor):", self.fit_p_guess, 0)
+        self._create_input_row(frame_fit, "k_alpha_guess (Or Fixed Value):", self.fit_k_guess, 1)
+        self._create_input_row(frame_fit, "Export Resolution (Rows):", self.fit_pts, 2)
+        self._create_input_row(frame_fit, "Terminal Points to Drop (Guillotine):", self.fit_drop, 3)
+        
+        # Dual execution controls
+        frame_buttons = ttk.Frame(self.tab_fit)
+        frame_buttons.pack(fill='x', padx=10, pady=15)
+        
+        ttk.Button(frame_buttons, text="Amputate & Fit (Both Parameters)", command=self.run_fitting).pack(side='left', expand=True, fill='x', padx=5)
+        ttk.Button(frame_buttons, text="Amputate & Fit (Fix k_alpha, Fit p_end)", command=self.run_one_parameter_fitting).pack(side='right', expand=True, fill='x', padx=5)
+
+
+    """
+    def _build_fit_tab(self):
+
         self._build_shared_inputs(self.tab_fit)
         
         # File selection area.
@@ -337,6 +406,8 @@ class GelThermodynamicsGUI:
         self._create_input_row(frame_fit, "Terminal Points to Drop (Guillotine):", self.fit_drop, 3)
         
         ttk.Button(self.tab_fit, text="Amputate Data & Engage Optimizer", command=self.run_fitting).pack(pady=15)
+    """
+
 
     def _build_plot_tab(self):
         """
@@ -484,20 +555,81 @@ class GelThermodynamicsGUI:
             
             # 8. Feed the victorious parameters back into the forward model for a high-res curve.
             df_fit = gel.simulate(p_end=p_opt, k_alpha=k_opt, num_points=pts)
-            
+            df_fit['drop'] = drop
+
             # 9. Brand the filename with the newly discovered kinetics.
-            filename = f"fit_s{params['s']}_p{p_opt:.4f}_k{k_opt:.3f}.csv"
+            filename = f"fit_s{params['s']}_p{p_opt:.4f}_k{k_opt:.3f}_drop{drop}.csv"
             df_fit.to_csv(filename, index=False)
             
             msg = (f"Convergence achieved.\n\n"
                    f"Extracted Q_eq_0: {Q_eq_0_real:.3f}\n"
                    f"Optimized p_end: {p_opt:.5f}\n"
                    f"Optimized k_alpha: {k_opt:.3e}\n\n"
+                   f"Dropped points: {drop}\n\n"
                    f"High-res curve saved to: {filename}")
             messagebox.showinfo("Optimization Complete", msg)
             
         except Exception as e:
             messagebox.showerror("Optimizer Choked", f"The physics engine rejected your reality. Reason:\n{e}")
+
+
+    def run_one_parameter_fitting(self):
+        """
+        Executes a restricted optimization, holding kinetics constant while forcing 
+        the algorithm to solve strictly for the terminal topology.
+        """
+        if not self.csv_path.get():
+            messagebox.showerror("Logic Error", "The algorithm cannot optimize a void. Select a CSV file.")
+            return
+            
+        try:
+            params = self._get_shared_floats()
+            p_guess = float(self.fit_p_guess.get())
+            # In this context, the guess field is treated as absolute law.
+            k_fixed = float(self.fit_k_guess.get()) 
+            pts = int(self.fit_pts.get())
+            drop = int(self.fit_drop.get())
+            
+            df_exp = pd.read_csv(self.csv_path.get())
+            
+            if drop > 0:
+                t_raw = df_exp.iloc[:-drop, 0].values
+                Q_exp = df_exp.iloc[:-drop, 1].values
+            else:
+                t_raw = df_exp.iloc[:, 0].values
+                Q_exp = df_exp.iloc[:, 1].values
+                
+            t_exp = t_raw / 1e5
+            Q_eq_0_real = Q_exp[0]
+            
+            gel = TopologicalTransformation(
+                f_A=params['f_A'], f_B=params['f_B'], s=params['s'], 
+                M_A=params['M_A'], M_B=params['M_B'], c_total=params['c_total'], Q_eq_0=Q_eq_0_real
+            )
+            
+            print("SciPy optimizer engaged in restricted 1D mode. UI will freeze. Do not panic.")
+            
+            # Unleash the restricted optimizer
+            p_opt = gel.one_parameter_fit_experiment(t_exp, Q_exp, p_guess, k_fixed)
+            
+            # Feed the victorious parameter back into the forward model
+            df_fit = gel.simulate(p_end=p_opt, k_alpha=k_fixed, num_points=pts)
+            df_fit['drop'] = drop
+            # Brand the filename differently so you know it was a restricted fit
+            filename = f"fit1D_s{params['s']}_p{p_opt:.4f}_k{k_fixed:.3f}_drop{drop}.csv"
+            df_fit.to_csv(filename, index=False)
+            
+            msg = (f"Partial convergence achieved.\n\n"
+                   f"Extracted Q_eq_0: {Q_eq_0_real:.3f}\n"
+                   f"Fixed k_alpha: {k_fixed:.3e}\n"
+                   f"Optimized p_end: {p_opt:.5f}\n\n"
+                   f"Dropped points: {drop}\n\n"
+                   f"High-res curve saved to: {filename}")
+            messagebox.showinfo("Optimization Complete", msg)
+            
+        except Exception as e:
+            messagebox.showerror("Optimizer Choked", f"The physics engine rejected your restricted reality. Reason:\n{e}")
+
 
     def render_plot(self):
         """
@@ -539,9 +671,10 @@ class GelThermodynamicsGUI:
                 
                 # Filter out mathematically infinite sol-state swelling arrays.
                 # If np.inf touches the axis, Matplotlib's scaling algorithms will immediately self-destruct.
+                drop_val = int(df['drop'].iloc[0])
                 df_valid = df[df['Q'] != np.inf]
                 
-                legend_tag = f"Model: s={s_val}, p={p_val:.3f}, k={k_val:.2e}"
+                legend_tag = f"Model: s={s_val}, p={p_val:.3f}, k={k_val:.2e}, drop={drop_val}"
                 ax.plot(df_valid['t'], df_valid['Q'], linewidth=2.5, label=legend_tag)
                 
             except Exception as e:
@@ -550,8 +683,10 @@ class GelThermodynamicsGUI:
         # 3. Apply superficial aesthetic decorations and labeling.
         ax.set_xlabel(r"Degradation Time ($10^5$ s)", fontsize=12, fontweight='bold')
         ax.set_ylabel("Swelling Ratio ($Q$)", fontsize=12, fontweight='bold')
-        ax.set_title("Macosko-Miller Gel Degradation Kinetics", fontsize=14)
+        ax.set_title("Gel Degradation Kinetics", fontsize=14)
         
+        ax.set_ylim(0, 50)
+
         # Enable gridlines, because you will inevitably attempt to estimate half-lives by eye.
         ax.grid(True, linestyle='--', alpha=0.5)
         
